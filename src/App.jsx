@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef } from "react";
-import { MEALS_PROFILE, GROCERY_PROFILE } from "./profile.js";
+import { MEALS_PROFILE, GROCERY_PROFILE, SWAP_PROFILE } from "./profile.js";
 
 const G = "#2d4a3e", CREAM = "#f7f4ef", BD = "#e8e2d8", GOLD = "#856404";
 
@@ -187,12 +187,19 @@ function GenerateTab({ onPlanGenerated }) {
     if (!form.date) { setError("Please enter the week start date."); return; }
     setError(""); setLoading(true);
 
+    const favMealNames = (plan?.meals || [])
+      .filter(m => favs[m.id])
+      .map(m => m.name)
+      .join(", ");
+
     const weekContext = `Week: ${form.date}. Prep day: ${form.prepday}.
 Ingredients to use up: ${form.ingredients || "nothing special"}.
 Scheduling: ${form.schedule || "normal week"}.
 Daughter requests: ${form.daughter || "TBD"}.
 Last week's meals (don't repeat): ${form.lastWeek || "not specified"}.
 Leftovers in fridge: ${form.leftovers || "none"}.
+Must include this week: ${form.mustInclude || "none"}.
+Favorites to rotate in if possible: ${favMealNames || "none"}.
 Other: ${form.other || "none"}.`;
 
     try {
@@ -229,6 +236,7 @@ Other: ${form.other || "none"}.`;
   const fields = [
     { k: "date", label: "Week start date *", ph: "e.g. Sunday, May 4, 2026", req: true },
     { k: "prepday", label: "Prep day", ph: "Sunday (default) or Saturday" },
+    { k: "mustInclude", label: "Must include this week?", ph: "e.g. tacos, something with shrimp — or leave blank" },
     { k: "ingredients", label: "Ingredients to use up?", ph: "e.g. rotisserie chicken — or leave blank" },
     { k: "schedule", label: "Scheduling notes?", ph: "e.g. husband out Mon–Tue, busy Thursday" },
     { k: "daughter", label: "Daughter's breakfast & lunch requests?", ph: "e.g. waffles, quesadillas — or TBD" },
@@ -238,11 +246,21 @@ Other: ${form.other || "none"}.`;
     { k: "other", label: "Anything else Claude should know?", ph: "e.g. trying a new cuisine, someone's birthday dinner" },
   ];
 
+  const favMealNames = (plan?.meals || [])
+    .filter(m => favs[m.id])
+    .map(m => m.name);
+
   return (
     <div>
       <div style={{ background: "#eef4f1", borderRadius: 12, padding: "12px 14px", marginBottom: 14, fontFamily: "sans-serif", fontSize: 13, color: G, lineHeight: 1.6 }}>
-        <b>Fill in your weekly details and tap Generate.</b> Claude will create your complete meal plan, recipes, and grocery list automatically — no copy-pasting needed!
+        <b>Fill in your weekly details and tap Generate.</b> Claude will create your complete meal plan, recipes, and grocery list automatically!
       </div>
+
+      {favMealNames.length > 0 && (
+        <div style={{ background: "#fff8e6", border: "1px solid #f0d080", borderRadius: 10, padding: "10px 13px", marginBottom: 13, fontFamily: "sans-serif", fontSize: 13, color: GOLD }}>
+          ⭐ <b>Favorites from last week:</b> {favMealNames.join(", ")} — Claude will try to rotate these in.
+        </div>
+      )}
 
       {fields.map(f => (
         <div key={f.k} style={{ marginBottom: 11 }}>
@@ -323,6 +341,10 @@ export default function App() {
   const [cartChecked, setCartChecked] = usePersist("mp_cart", {});
   const [actualTimes, setActualTimes] = usePersist("mp_times", {});
   const [gCopied, setGCopied] = useState(false);
+  const [swapping, setSwapping] = useState(null); // meal id being swapped
+  const [swapInput, setSwapInput] = useState("");
+  const [swapLoading, setSwapLoading] = useState(false);
+  const [swapError, setSwapError] = useState("");
 
   const togStep = (id, j) => setChecked(p => ({ ...p, [`${id}-${j}`]: !p[`${id}-${j}`] }));
   const setRat = (id, v) => setRatings(p => ({ ...p, [id]: p[id] === v ? null : v }));
@@ -334,6 +356,90 @@ export default function App() {
   const togCart = key => setCartChecked(p => ({ ...p, [key]: !p[key] }));
   const clearCart = () => setCartChecked({});
   const saveTime = (id, secs) => setActualTimes(p => ({ ...p, [id]: [...(p[id] || []), secs] }));
+
+  const swapMeal = async (mealId) => {
+    setSwapLoading(true);
+    setSwapError("");
+    try {
+      const mealToSwap = plan.meals.find(m => m.id === mealId);
+      const otherMeals = plan.meals.filter(m => m.id !== mealId).map(m => m.name).join(", ");
+      const prompt = `Replace this meal: ${mealToSwap.day} — ${mealToSwap.name}.
+Other meals this week (do not repeat these): ${otherMeals}.
+Reason for swap / craving: ${swapInput || "just want something different"}.
+Keep the same day (${mealToSwap.day}) and id (${mealToSwap.id}).`;
+
+      const res = await fetch("/.netlify/functions/generate", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          system: SWAP_PROFILE,
+          messages: [{ role: "user", content: prompt }],
+          max_tokens: 2000,
+        }),
+      });
+      const data = await res.json();
+      if (!res.ok || data.error) throw new Error(data.error?.message || "API error");
+      const text = data.content?.[0]?.text;
+      if (!text) throw new Error("No response");
+
+      let result;
+      try { result = JSON.parse(text); } catch {
+        const match = text.match(/\{[\s\S]*\}/);
+        if (match) result = JSON.parse(match[0]);
+        else throw new Error("Invalid JSON response");
+      }
+
+      // Update the plan with the new meal
+      const updatedMeals = plan.meals.map(m => m.id === mealId ? result.meal : m);
+
+      // Update prep steps if needed
+      let updatedPrepSteps = [...(plan.prepSteps || [])];
+      if (result.prepStepUpdate) {
+        // Replace or add prep step for this meal
+        const dayLabel = mealToSwap.name.toUpperCase();
+        const existingIdx = updatedPrepSteps.findIndex(s => s.toUpperCase().includes(mealToSwap.name.toUpperCase()));
+        if (result.prepStepUpdate.trim()) {
+          if (existingIdx >= 0) updatedPrepSteps[existingIdx] = result.prepStepUpdate;
+          else updatedPrepSteps.push(result.prepStepUpdate);
+        } else {
+          if (existingIdx >= 0) updatedPrepSteps.splice(existingIdx, 1);
+        }
+      }
+
+      // Update lunch coverage if needed
+      let updatedLunchCoverage = [...(plan.lunchCoverage || [])];
+      if (result.lunchUpdate) {
+        const lunchIdx = updatedLunchCoverage.findIndex(l => l.day === result.lunchUpdate.day);
+        if (lunchIdx >= 0) updatedLunchCoverage[lunchIdx] = result.lunchUpdate;
+      }
+
+      const updatedPlan = {
+        ...plan,
+        meals: updatedMeals,
+        prepSteps: updatedPrepSteps,
+        lunchCoverage: updatedLunchCoverage,
+      };
+
+      setPlan(updatedPlan);
+      setSwapping(null);
+      setSwapInput("");
+
+      // Save to cloud
+      setSyncStatus("Saving...");
+      try {
+        await savePlanToCloud(updatedPlan);
+        const plans = await loadPlansFromCloud();
+        setHistory(plans);
+        setSyncStatus("✅ Saved");
+      } catch { setSyncStatus("⚠️ Saved locally only"); }
+      setTimeout(() => setSyncStatus(""), 3000);
+
+    } catch (err) {
+      setSwapError(`Swap failed: ${err.message}. Try again.`);
+    } finally {
+      setSwapLoading(false);
+    }
+  };
   const fmtAvg = secs => `${Math.round(secs / 60)} min`;
   const cartCount = Object.values(cartChecked).filter(Boolean).length;
   const leftoverList = Object.entries(lftovrs).filter(([, v]) => v).map(([k]) => k);
@@ -499,10 +605,31 @@ export default function App() {
                     <div style={{ display: "flex", gap: 6, marginTop: times.length ? 4 : 11, marginBottom: 10, flexWrap: "wrap" }}>
                       <button onClick={() => { setCook(true); setCookId(m.id); }} style={{ background: G, color: "#f5ede0", border: "none", borderRadius: 8, padding: "7px 11px", fontFamily: "sans-serif", fontSize: 12, cursor: "pointer" }}>🔆 Cook Mode</button>
                       <button onClick={() => togFav(m.id)} style={{ background: favs[m.id] ? "#fff8e6" : "#f5f0e8", color: favs[m.id] ? GOLD : "#555", border: `1px solid ${favs[m.id] ? "#f0d080" : BD}`, borderRadius: 8, padding: "7px 11px", fontFamily: "sans-serif", fontSize: 12, cursor: "pointer" }}>{favs[m.id] ? "⭐ Fav'd" : "☆ Favorite"}</button>
+                      <button onClick={() => { setSwapping(swapping === m.id ? null : m.id); setSwapError(""); setSwapInput(""); }} style={{ background: swapping === m.id ? "#fff3cd" : "#f5f0e8", color: swapping === m.id ? GOLD : "#555", border: `1px solid ${swapping === m.id ? "#f0d080" : BD}`, borderRadius: 8, padding: "7px 11px", fontFamily: "sans-serif", fontSize: 12, cursor: "pointer" }}>🔄 Swap</button>
                       {[["loved", "👍"], ["okay", "😐"], ["disliked", "👎"]].map(([v, e]) => (
                         <button key={v} onClick={() => setRat(m.id, v)} style={{ background: ratings[m.id] === v ? (v === "loved" ? "#e8f5e9" : v === "okay" ? "#fff8e1" : "#ffebee") : "#f5f0e8", border: `1px solid ${ratings[m.id] === v ? (v === "loved" ? "#a5d6a7" : v === "okay" ? "#ffe082" : "#ef9a9a") : BD}`, borderRadius: 8, padding: "7px 10px", fontSize: 13, cursor: "pointer" }}>{e}</button>
                       ))}
                     </div>
+
+                    {/* Swap panel */}
+                    {swapping === m.id && (
+                      <div style={{ background: "#fffdf5", border: `1px solid #f0d080`, borderRadius: 10, padding: "12px 13px", marginBottom: 11 }}>
+                        <div style={{ fontFamily: "sans-serif", fontSize: 13, fontWeight: "bold", color: GOLD, marginBottom: 7 }}>🔄 Swap this meal</div>
+                        <input
+                          value={swapInput}
+                          onChange={e => setSwapInput(e.target.value)}
+                          placeholder="What are you craving? (or leave blank for a surprise)"
+                          style={{ width: "100%", background: "#fff", border: `1px solid ${BD}`, borderRadius: 8, fontFamily: "sans-serif", fontSize: 13, padding: "8px 10px", color: "#333", boxSizing: "border-box", marginBottom: 8 }}
+                        />
+                        {swapError && <div style={{ fontFamily: "sans-serif", fontSize: 12, color: "#c62828", marginBottom: 8 }}>{swapError}</div>}
+                        <div style={{ display: "flex", gap: 7 }}>
+                          <button onClick={() => swapMeal(m.id)} disabled={swapLoading} style={{ flex: 1, background: swapLoading ? "#aaa" : GOLD, color: "#fff", border: "none", borderRadius: 8, padding: "9px", fontFamily: "sans-serif", fontSize: 13, cursor: swapLoading ? "default" : "pointer", fontWeight: "bold" }}>
+                            {swapLoading ? "Finding a new meal..." : "✨ Generate swap"}
+                          </button>
+                          <button onClick={() => { setSwapping(null); setSwapInput(""); setSwapError(""); }} style={{ background: "#f5f0e8", color: "#555", border: `1px solid ${BD}`, borderRadius: 8, padding: "9px 13px", fontFamily: "sans-serif", fontSize: 13, cursor: "pointer" }}>Cancel</button>
+                        </div>
+                      </div>
+                    )}
                     <textarea value={notes[m.id] || ""} onChange={e => setNotes(p => ({ ...p, [m.id]: e.target.value }))} placeholder="Notes for next time..." style={{ width: "100%", background: "#fafaf7", border: `1px solid ${BD}`, borderRadius: 8, fontFamily: "sans-serif", fontSize: 13, padding: "8px 10px", color: "#444", minHeight: 46, resize: "vertical", boxSizing: "border-box", marginBottom: settings.source ? 7 : 11 }} />
                     {settings.source && <input value={sources[m.id] || ""} onChange={e => setSources(p => ({ ...p, [m.id]: e.target.value }))} placeholder="Recipe source URL (optional)..." style={{ width: "100%", background: "#fafaf7", border: `1px solid ${BD}`, borderRadius: 8, fontFamily: "sans-serif", fontSize: 13, padding: "8px 10px", color: "#444", boxSizing: "border-box", marginBottom: 11 }} />}
                     <div style={{ display: "flex", flexDirection: "column", gap: 6, marginBottom: 13 }}>
