@@ -89,6 +89,8 @@ You must respond with ONLY a raw JSON object. Absolutely nothing else.
 - No comments inside the JSON
 - Start your response with { and end with }
 - The entire response must be parseable by JSON.parse()
+- Keep ALL text concise — max 100 characters per ingredient or step
+- Limit each meal to 8 ingredients and 8 steps maximum
 
 Any text outside the JSON object will break the app.
 
