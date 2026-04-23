@@ -135,10 +135,35 @@ function CookScreen({ meal, checked, togStep, ratings, setRat, notes, setNotes, 
   );
 }
 
+// ── Shared Claude API call ────────────────────────────────────────────────────
+async function callClaude(system, userMessage, maxTokens) {
+  const res = await fetch("/.netlify/functions/generate", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      system,
+      messages: [{ role: "user", content: userMessage }],
+      max_tokens: maxTokens,
+    }),
+  });
+  const data = await res.json();
+  if (!res.ok || data.error) {
+    const errMsg = data.error?.message || JSON.stringify(data.error) || JSON.stringify(data);
+    throw new Error(`API returned ${res.status}: ${errMsg}`);
+  }
+  const text = data.content?.[0]?.text;
+  if (!text) throw new Error("No response from Claude");
+  try { return JSON.parse(text); } catch {}
+  try { return JSON.parse(text.replace(/^```json\s*/i, "").replace(/```\s*$/i, "").trim()); } catch {}
+  const match = text.match(/\{[\s\S]*\}/);
+  if (match) return JSON.parse(match[0]);
+  throw new Error("Claude returned invalid JSON. Please try again.");
+}
+
 // ── Generate tab ──────────────────────────────────────────────────────────────
 function GenerateTab({ onPlanGenerated, plan, favs }) {
   const [form, setForm] = useState({
-    date: "", prepday: "Sunday", ingredients: "", schedule: "", daughter: "", lastWeek: "", leftovers: "", extras: "", other: ""
+    date: "", prepday: "Sunday", mustInclude: "", ingredients: "", schedule: "", daughter: "", lastWeek: "", leftovers: "", extras: "", other: ""
   });
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
@@ -157,31 +182,6 @@ function GenerateTab({ onPlanGenerated, plan, favs }) {
   }, []);
 
   const set = (k, v) => setForm(p => ({ ...p, [k]: v }));
-
-  const callClaude = async (system, userMessage, maxTokens) => {
-    const res = await fetch("/.netlify/functions/generate", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        system,
-        messages: [{ role: "user", content: userMessage }],
-        max_tokens: maxTokens,
-      }),
-    });
-    const data = await res.json();
-    if (!res.ok || data.error) {
-      const errMsg = data.error?.message || JSON.stringify(data.error) || JSON.stringify(data);
-      throw new Error(`API returned ${res.status}: ${errMsg}`);
-    }
-    const text = data.content?.[0]?.text;
-    if (!text) throw new Error("No response from Claude");
-    // Robust JSON parsing
-    try { return JSON.parse(text); } catch {}
-    try { return JSON.parse(text.replace(/^```json\s*/i, "").replace(/```\s*$/i, "").trim()); } catch {}
-    const match = text.match(/\{[\s\S]*\}/);
-    if (match) return JSON.parse(match[0]);
-    throw new Error("Claude returned invalid JSON. Please try again.");
-  };
 
   const generate = async () => {
     if (!form.date) { setError("Please enter the week start date."); return; }
@@ -341,10 +341,11 @@ export default function App() {
   const [cartChecked, setCartChecked] = usePersist("mp_cart", {});
   const [actualTimes, setActualTimes] = usePersist("mp_times", {});
   const [gCopied, setGCopied] = useState(false);
-  const [swapping, setSwapping] = useState(null); // meal id being swapped
+  const [swapping, setSwapping] = useState(null);
   const [swapInput, setSwapInput] = useState("");
   const [swapLoading, setSwapLoading] = useState(false);
   const [swapError, setSwapError] = useState("");
+  const [swapStatus, setSwapStatus] = useState("");
 
   const togStep = (id, j) => setChecked(p => ({ ...p, [`${id}-${j}`]: !p[`${id}-${j}`] }));
   const setRat = (id, v) => setRatings(p => ({ ...p, [id]: p[id] === v ? null : v }));
@@ -394,11 +395,9 @@ Keep the same day (${mealToSwap.day}) and id (${mealToSwap.id}).`;
 
       // Update prep steps if needed
       let updatedPrepSteps = [...(plan.prepSteps || [])];
-      if (result.prepStepUpdate) {
-        // Replace or add prep step for this meal
-        const dayLabel = mealToSwap.name.toUpperCase();
+      if (result.prepStepUpdate !== undefined) {
         const existingIdx = updatedPrepSteps.findIndex(s => s.toUpperCase().includes(mealToSwap.name.toUpperCase()));
-        if (result.prepStepUpdate.trim()) {
+        if (result.prepStepUpdate && result.prepStepUpdate.trim()) {
           if (existingIdx >= 0) updatedPrepSteps[existingIdx] = result.prepStepUpdate;
           else updatedPrepSteps.push(result.prepStepUpdate);
         } else {
@@ -413,16 +412,41 @@ Keep the same day (${mealToSwap.day}) and id (${mealToSwap.id}).`;
         if (lunchIdx >= 0) updatedLunchCoverage[lunchIdx] = result.lunchUpdate;
       }
 
+      // Clear ratings, notes, and cook times for the swapped meal
+      setRatings(p => { const n = { ...p }; delete n[mealId]; return n; });
+      setNotes(p => { const n = { ...p }; delete n[mealId]; return n; });
+      setActualTimes(p => { const n = { ...p }; delete n[mealId]; return n; });
+
+      // Regenerate grocery list based on updated meals
+      setSwapStatus("Updating grocery list...");
+      const mealSummary = updatedMeals.map(m =>
+        `${m.day}: ${m.name} — ingredients: ${(m.ingredients || []).join(", ")}`
+      ).join("\n");
+
+      let updatedGrocery = plan.grocery;
+      try {
+        const groceryResult = await callClaude(
+          GROCERY_PROFILE,
+          `Generate a grocery list for this week's meals:\n\n${mealSummary}\n\nExtra items needed: none.`,
+          4000
+        );
+        if (groceryResult.grocery) updatedGrocery = groceryResult.grocery;
+      } catch {
+        // If grocery regen fails, keep existing grocery list
+      }
+
       const updatedPlan = {
         ...plan,
         meals: updatedMeals,
         prepSteps: updatedPrepSteps,
         lunchCoverage: updatedLunchCoverage,
+        grocery: updatedGrocery,
       };
 
       setPlan(updatedPlan);
       setSwapping(null);
       setSwapInput("");
+      setSwapStatus("");
 
       // Save to cloud
       setSyncStatus("Saving...");
@@ -622,6 +646,7 @@ Keep the same day (${mealToSwap.day}) and id (${mealToSwap.id}).`;
                           style={{ width: "100%", background: "#fff", border: `1px solid ${BD}`, borderRadius: 8, fontFamily: "sans-serif", fontSize: 13, padding: "8px 10px", color: "#333", boxSizing: "border-box", marginBottom: 8 }}
                         />
                         {swapError && <div style={{ fontFamily: "sans-serif", fontSize: 12, color: "#c62828", marginBottom: 8 }}>{swapError}</div>}
+                        {swapStatus && <div style={{ fontFamily: "sans-serif", fontSize: 12, color: G, marginBottom: 8 }}>⏳ {swapStatus}</div>}
                         <div style={{ display: "flex", gap: 7 }}>
                           <button onClick={() => swapMeal(m.id)} disabled={swapLoading} style={{ flex: 1, background: swapLoading ? "#aaa" : GOLD, color: "#fff", border: "none", borderRadius: 8, padding: "9px", fontFamily: "sans-serif", fontSize: 13, cursor: swapLoading ? "default" : "pointer", fontWeight: "bold" }}>
                             {swapLoading ? "Finding a new meal..." : "✨ Generate swap"}
