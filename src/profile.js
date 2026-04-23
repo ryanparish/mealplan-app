@@ -87,6 +87,7 @@ lunchUpdate should reflect whether this new meal makes enough for next-day adult
 If the meal doesn't make leftovers set lunchUpdate to null.
 `;
 
+export const GROCERY_PROFILE = `
 You are a grocery list generator. Based on the meal plan provided, generate a complete grocery list in JSON.
 
 FAMILY WEEKLY STAPLES (always include these with 🔁 in the s field):
