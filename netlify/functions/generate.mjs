@@ -23,7 +23,7 @@ export default async (req, context) => {
       },
       body: JSON.stringify({
         model: "claude-sonnet-4-5",
-        max_tokens: 8000,
+        max_tokens: 12000,
         system: body.system,
         messages: body.messages,
       }),

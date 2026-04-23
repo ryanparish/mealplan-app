@@ -80,9 +80,17 @@ Low-FODMAP rules:
 
 ---
 
-## OUTPUT FORMAT
+## CRITICAL OUTPUT INSTRUCTIONS
 
-You must respond with a single valid JSON object and nothing else. No markdown, no explanation, no code fences. Just raw JSON.
+You must respond with ONLY a raw JSON object. Absolutely nothing else.
+- No markdown code fences (no \`\`\`json or \`\`\`)
+- No introductory text like "Here is your meal plan"
+- No explanation after the JSON
+- No comments inside the JSON
+- Start your response with { and end with }
+- The entire response must be parseable by JSON.parse()
+
+Any text outside the JSON object will break the app.
 
 The JSON must match this exact structure:
 

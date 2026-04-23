@@ -184,8 +184,29 @@ Remember: respond with only a valid JSON object matching the exact structure spe
       if (!text) throw new Error("No response from Claude");
 
       setStatus("Parsing your meal plan...");
-      const clean = text.replace(/```json|```/g, "").trim();
-      const plan = JSON.parse(clean);
+
+      // Try multiple parsing strategies
+      let plan;
+      try {
+        // Strategy 1: direct parse
+        plan = JSON.parse(text);
+      } catch {
+        try {
+          // Strategy 2: strip markdown fences
+          const stripped = text.replace(/^```json\s*/i, "").replace(/^```\s*/i, "").replace(/```\s*$/i, "").trim();
+          plan = JSON.parse(stripped);
+        } catch {
+          try {
+            // Strategy 3: extract first { ... } block
+            const match = text.match(/\{[\s\S]*\}/);
+            if (!match) throw new Error("No JSON object found in response");
+            plan = JSON.parse(match[0]);
+          } catch {
+            console.error("Raw response:", text);
+            throw new Error("Claude returned invalid JSON. Try generating again.");
+          }
+        }
+      }
 
       onPlanGenerated(plan);
       setStatus("");
