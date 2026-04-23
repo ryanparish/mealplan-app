@@ -136,7 +136,7 @@ function CookScreen({ meal, checked, togStep, ratings, setRat, notes, setNotes, 
 }
 
 // ── Generate tab ──────────────────────────────────────────────────────────────
-function GenerateTab({ onPlanGenerated }) {
+function GenerateTab({ onPlanGenerated, plan, favs }) {
   const [form, setForm] = useState({
     date: "", prepday: "Sunday", ingredients: "", schedule: "", daughter: "", lastWeek: "", leftovers: "", extras: "", other: ""
   });
@@ -188,7 +188,7 @@ function GenerateTab({ onPlanGenerated }) {
     setError(""); setLoading(true);
 
     const favMealNames = (plan?.meals || [])
-      .filter(m => favs[m.id])
+      .filter(m => (favs || {})[m.id])
       .map(m => m.name)
       .join(", ");
 
@@ -247,7 +247,7 @@ Other: ${form.other || "none"}.`;
   ];
 
   const favMealNames = (plan?.meals || [])
-    .filter(m => favs[m.id])
+    .filter(m => (favs || {})[m.id])
     .map(m => m.name);
 
   return (
@@ -530,7 +530,7 @@ Keep the same day (${mealToSwap.day}) and id (${mealToSwap.id}).`;
       <div style={{ maxWidth: 640, margin: "0 auto", padding: "13px 13px 60px" }}>
 
         {/* ── GENERATE ── */}
-        {tab === "generate" && <GenerateTab onPlanGenerated={handlePlanGenerated} />}
+        {tab === "generate" && <GenerateTab onPlanGenerated={handlePlanGenerated} plan={plan} favs={favs} />}
 
         {/* ── DINNERS ── */}
         {tab === "dinners" && !hasPlan && (
