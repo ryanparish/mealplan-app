@@ -6,8 +6,10 @@
   directory = "netlify/functions"
   node_bundler = "esbuild"
 
-[functions.generate]
-  timeout = 60
+[[redirects]]
+  from = "/.netlify/functions/*"
+  to = "/.netlify/functions/:splat"
+  status = 200
 
 [[redirects]]
   from = "/*"

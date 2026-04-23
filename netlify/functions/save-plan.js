@@ -7,26 +7,38 @@ exports.handler = async function (event, context) {
 
   try {
     const { plan } = JSON.parse(event.body);
-    const supabaseUrl = process.env.SUPABASE_URL;
+    let supabaseUrl = process.env.SUPABASE_URL;
     const supabaseKey = process.env.SUPABASE_KEY;
 
     if (!supabaseUrl || !supabaseKey) {
       return {
         statusCode: 500,
-        body: JSON.stringify({ error: "Supabase environment variables not set" }),
+        body: JSON.stringify({ error: "Missing SUPABASE_URL or SUPABASE_KEY environment variables" }),
       };
     }
 
-    const supabase = createClient(supabaseUrl, supabaseKey);
-    const id = plan.weekOf.toLowerCase().replace(/[^a-z0-9]+/g, "-");
+    // Clean up URL — remove trailing slash and whitespace
+    supabaseUrl = supabaseUrl.trim().replace(/\/+$/, "");
+    console.log("Supabase URL:", supabaseUrl);
 
-    const { error } = await supabase
+    const supabase = createClient(supabaseUrl, supabaseKey.trim());
+    const id = (plan.weekOf || "unknown").toLowerCase().replace(/[^a-z0-9]+/g, "-");
+
+    console.log("Upserting plan with id:", id);
+
+    const { data, error } = await supabase
       .from("meal_plans")
-      .upsert({ id, week_of: plan.weekOf, data: plan });
+      .upsert(
+        { id, week_of: plan.weekOf, data: plan },
+        { onConflict: "id" }
+      );
 
-    if (error) throw new Error(error.message);
+    if (error) {
+      console.error("Supabase upsert error:", JSON.stringify(error));
+      throw new Error(error.message);
+    }
 
-    // Clean up plans older than 3 months
+    // Clean up old plans
     const threeMonthsAgo = new Date();
     threeMonthsAgo.setMonth(threeMonthsAgo.getMonth() - 3);
     await supabase
