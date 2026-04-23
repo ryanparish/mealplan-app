@@ -177,7 +177,8 @@ Remember: respond with only a valid JSON object matching the exact structure spe
       const data = await res.json();
 
       if (!res.ok || data.error) {
-        throw new Error(data.error?.message || data.error || "API error");
+        const errMsg = data.error?.message || JSON.stringify(data.error) || JSON.stringify(data);
+        throw new Error(`API returned ${res.status}: ${errMsg}`);
       }
 
       const text = data.content?.[0]?.text;

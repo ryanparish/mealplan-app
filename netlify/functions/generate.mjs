@@ -8,7 +8,7 @@ export default async (req, context) => {
     const apiKey = process.env.ANTHROPIC_API_KEY;
 
     if (!apiKey) {
-      return new Response(JSON.stringify({ error: "API key not configured" }), {
+      return new Response(JSON.stringify({ error: { message: "ANTHROPIC_API_KEY environment variable is not set in Netlify" } }), {
         status: 500,
         headers: { "Content-Type": "application/json" },
       });
@@ -31,6 +31,10 @@ export default async (req, context) => {
 
     const data = await response.json();
 
+    if (!response.ok) {
+      console.error("Anthropic API error:", JSON.stringify(data));
+    }
+
     return new Response(JSON.stringify(data), {
       status: response.status,
       headers: {
@@ -39,7 +43,8 @@ export default async (req, context) => {
       },
     });
   } catch (err) {
-    return new Response(JSON.stringify({ error: err.message }), {
+    console.error("Function error:", err.message);
+    return new Response(JSON.stringify({ error: { message: err.message } }), {
       status: 500,
       headers: { "Content-Type": "application/json" },
     });
