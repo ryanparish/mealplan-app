@@ -144,6 +144,18 @@ function GenerateTab({ onPlanGenerated }) {
   const [error, setError] = useState("");
   const [status, setStatus] = useState("");
 
+  // Listen for "use this week again" prefill from history tab
+  useEffect(() => {
+    const handler = (e) => {
+      setForm(p => ({
+        ...p,
+        other: `Repeat meals from week of ${e.detail.weekOf}: ${e.detail.hint}. Adjust as needed.`,
+      }));
+    };
+    window.addEventListener("prefill-generate", handler);
+    return () => window.removeEventListener("prefill-generate", handler);
+  }, []);
+
   const set = (k, v) => setForm(p => ({ ...p, [k]: v }));
 
   const callClaude = async (system, userMessage, maxTokens) => {
@@ -268,9 +280,32 @@ const SET_LABELS = {
 };
 const LEFTOVER_OPTIONS = ["Taco meat", "Korean beef + rice", "Salmon + peppers + rice", "Turkey skillet", "Tzatziki", "Rotisserie chicken", "Cooked rice"];
 
+// ── Supabase helpers ──────────────────────────────────────────────────────────
+async function savePlanToCloud(plan) {
+  const res = await fetch("/.netlify/functions/save-plan", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ plan }),
+  });
+  if (!res.ok) { const e = await res.json(); throw new Error(e.error || "Save failed"); }
+  return res.json();
+}
+
+async function loadPlansFromCloud() {
+  const res = await fetch("/.netlify/functions/load-plans");
+  if (!res.ok) { const e = await res.json(); throw new Error(e.error || "Load failed"); }
+  const { plans } = await res.json();
+  return plans;
+}
+
 export default function App() {
   const [tab, setTab] = useState("generate");
   const [plan, setPlan] = usePersist("mp_plan", null);
+  const [history, setHistory] = useState([]);
+  const [historyLoading, setHistoryLoading] = useState(false);
+  const [historyError, setHistoryError] = useState("");
+  const [viewingPast, setViewingPast] = useState(null);
+  const [syncStatus, setSyncStatus] = useState("");
   const [openMeal, setOpenMeal] = useState(null);
   const [openGrp, setOpenGrp] = useState(null);
   const [prepOpen, setPrepOpen] = useState(false);
@@ -304,11 +339,33 @@ export default function App() {
   const leftoverList = Object.entries(lftovrs).filter(([, v]) => v).map(([k]) => k);
   const favMeals = (plan?.meals || []).filter(m => favs[m.id]);
 
-  const handlePlanGenerated = (newPlan) => {
+  // Load latest plan from cloud on mount
+  useEffect(() => {
+    loadPlansFromCloud().then(plans => {
+      if (plans && plans.length > 0) {
+        const latest = plans[0].data;
+        setPlan(latest);
+        setHistory(plans);
+      }
+    }).catch(() => {}); // Fail silently — localStorage fallback still works
+  }, []);
+
+  const handlePlanGenerated = async (newPlan) => {
     setPlan(newPlan);
     setCartChecked({});
     setChecked({});
     setTab("dinners");
+    // Save to cloud
+    setSyncStatus("Saving...");
+    try {
+      await savePlanToCloud(newPlan);
+      const plans = await loadPlansFromCloud();
+      setHistory(plans);
+      setSyncStatus("✅ Saved");
+    } catch (e) {
+      setSyncStatus("⚠️ Saved locally only");
+    }
+    setTimeout(() => setSyncStatus(""), 3000);
   };
 
   const groceryText = () => {
@@ -333,7 +390,7 @@ export default function App() {
     return <CookScreen meal={m} checked={checked} togStep={togStep} ratings={ratings} setRat={setRat} notes={notes} setNotes={setNotes} onExit={() => { setCook(false); setCookId(null); }} onSaveTime={saveTime} />;
   }
 
-  const TABS = ["generate", "dinners", "lunches", "groceries", "settings"];
+  const TABS = ["generate", "dinners", "lunches", "groceries", "history", "settings"];
   const hasPlan = plan && plan.meals && plan.meals.length > 0;
 
   return (
@@ -347,6 +404,7 @@ export default function App() {
           {hasPlan ? "Family Meal Plan" : "Let's Plan Your Week"}
         </h1>
         {hasPlan && <div style={{ fontSize: 11, color: "#a8c5b5", marginBottom: 10 }}>🍕 Friday = Pizza &nbsp;·&nbsp; 🍽️ Saturday = Dining Out</div>}
+        {syncStatus && <div style={{ fontSize: 11, color: "#a8c5b5", marginTop: 6, fontFamily: "sans-serif" }}>{syncStatus}</div>}
         {hasPlan && plan.daughterReminder && (
           <div style={{ background: "#fff3cd", color: GOLD, borderRadius: 8, padding: "8px 13px", fontSize: 12, fontFamily: "sans-serif", display: "inline-block", maxWidth: 360 }}>
             ⚠️ Ask your daughter what she wants for breakfasts & lunches!
@@ -358,7 +416,7 @@ export default function App() {
       <div style={{ display: "flex", background: "#fff", borderBottom: `2px solid ${BD}`, overflowX: "auto" }}>
         {TABS.map(t => (
           <button key={t} onClick={() => setTab(t)} style={{ flex: "0 0 auto", padding: "11px 10px", border: "none", background: "none", fontFamily: "sans-serif", fontSize: 11, cursor: "pointer", color: tab === t ? G : "#999", fontWeight: tab === t ? "bold" : "normal", borderBottom: tab === t ? `3px solid ${G}` : "3px solid transparent", marginBottom: -2, whiteSpace: "nowrap" }}>
-            {t === "generate" ? "✨ Generate" : t === "dinners" ? "🍳 Dinners" : t === "lunches" ? "🥗 Lunches" : t === "groceries" ? "🛒 Groceries" : "⚙️ Settings"}
+            {t === "generate" ? "✨ Generate" : t === "dinners" ? "🍳 Dinners" : t === "lunches" ? "🥗 Lunches" : t === "groceries" ? "🛒 Groceries" : t === "history" ? "📚 History" : "⚙️ Settings"}
           </button>
         ))}
       </div>
@@ -628,6 +686,94 @@ export default function App() {
               <div style={{ fontFamily: "sans-serif", fontWeight: "bold", fontSize: 13, color: "#1a4a7a", marginBottom: 4 }}>👧 Daughter's Items</div>
               <div style={{ fontFamily: "sans-serif", fontSize: 13, color: "#444" }}>Add her requests in the Generate form and they'll appear in the grocery list automatically!</div>
             </div>
+          </div>
+        )}
+
+        {/* ── HISTORY ── */}
+        {tab === "history" && (
+          <div>
+            <div style={{ background: "#eef4f1", borderRadius: 12, padding: "12px 14px", marginBottom: 14, fontFamily: "sans-serif", fontSize: 13, color: G }}>
+              Past meal plans from the last 3 months. Tap any week to browse it, or use it as a starting point for a new plan.
+            </div>
+
+            {viewingPast ? (
+              // ── Past plan viewer ──
+              <div>
+                <button onClick={() => setViewingPast(null)} style={{ display: "flex", alignItems: "center", gap: 7, background: "none", border: "none", color: G, fontFamily: "sans-serif", fontSize: 13, cursor: "pointer", marginBottom: 14, padding: 0 }}>
+                  ← Back to history
+                </button>
+                <div style={{ background: G, color: "#f5ede0", borderRadius: 12, padding: "13px 15px", marginBottom: 14 }}>
+                  <div style={{ fontSize: 11, color: "#a8c5b5", textTransform: "uppercase", letterSpacing: 1, fontFamily: "sans-serif", marginBottom: 4 }}>Past Plan</div>
+                  <div style={{ fontSize: 17 }}>Week of {viewingPast.weekOf}</div>
+                </div>
+
+                {/* Use again button */}
+                <button onClick={() => {
+                  const meals = viewingPast.meals?.map(m => m.name).join(", ");
+                  setTab("generate");
+                  setViewingPast(null);
+                  // Pre-fill last week field with these meals as a hint
+                  setTimeout(() => {
+                    const event = new CustomEvent("prefill-generate", { detail: { hint: meals, weekOf: viewingPast.weekOf } });
+                    window.dispatchEvent(event);
+                  }, 100);
+                }} style={{ width: "100%", background: GOLD, color: "#fff", border: "none", borderRadius: 10, padding: "11px", fontFamily: "sans-serif", fontSize: 13, cursor: "pointer", fontWeight: "bold", marginBottom: 14 }}>
+                  🔄 Use this week as a starting point
+                </button>
+
+                {/* Past meals read-only */}
+                {(viewingPast.meals || []).map((m, i) => (
+                  <Card key={i}>
+                    <div style={{ padding: "12px 14px" }}>
+                      <div style={{ display: "flex", flexWrap: "wrap", gap: 6, alignItems: "center", marginBottom: 4 }}>
+                        <span style={{ fontSize: 10, color: "#7a9e8e", fontFamily: "sans-serif", letterSpacing: 1, textTransform: "uppercase" }}>{m.day}</span>
+                        <Bdg label={m.badge} />
+                      </div>
+                      <div style={{ fontSize: 15, color: "#222", marginBottom: 6 }}>{m.name}</div>
+                      <div style={{ fontSize: 11, color: "#bbb", fontFamily: "sans-serif", marginBottom: 10 }}>⏱ Est: {m.estMin} min</div>
+                      <div style={{ fontSize: 12, color: "#999", fontFamily: "sans-serif", marginBottom: 8, fontStyle: "italic" }}>Read-only — generate a new plan to cook again</div>
+                      <div style={{ fontSize: 11, fontFamily: "sans-serif", fontWeight: "bold", color: G, letterSpacing: 1.5, textTransform: "uppercase", marginBottom: 6 }}>Ingredients</div>
+                      <ul style={{ margin: "0 0 10px", paddingLeft: 16 }}>
+                        {(m.ingredients || []).map((g, j) => <li key={j} style={{ fontSize: 13, color: "#555", fontFamily: "sans-serif", marginBottom: 3 }}>{g}</li>)}
+                      </ul>
+                      <div style={{ fontSize: 11, fontFamily: "sans-serif", fontWeight: "bold", color: G, letterSpacing: 1.5, textTransform: "uppercase", marginBottom: 6 }}>Steps</div>
+                      <ol style={{ margin: 0, paddingLeft: 18 }}>
+                        {(m.steps || []).map((s, j) => <li key={j} style={{ fontSize: 13, color: s.startsWith("💡") ? "#aaa" : "#444", fontFamily: "sans-serif", marginBottom: 4, fontStyle: s.startsWith("💡") ? "italic" : "normal" }}>{s}</li>)}
+                      </ol>
+                    </div>
+                  </Card>
+                ))}
+              </div>
+            ) : (
+              // ── History list ──
+              history.length === 0 ? (
+                <div style={{ textAlign: "center", padding: "40px 20px", fontFamily: "sans-serif", color: "#aaa" }}>
+                  <div style={{ fontSize: 32, marginBottom: 12 }}>📚</div>
+                  <div style={{ fontSize: 13 }}>No past plans yet. Generate your first plan to start building history!</div>
+                </div>
+              ) : (
+                history.map((record, i) => {
+                  const p = record.data;
+                  const isCurrentWeek = i === 0;
+                  return (
+                    <div key={record.id} onClick={() => setViewingPast(p)} style={{ background: "#fff", borderRadius: 12, border: `1px solid ${isCurrentWeek ? G : BD}`, padding: "13px 15px", marginBottom: 10, cursor: "pointer", boxShadow: "0 1px 5px rgba(0,0,0,.04)" }}>
+                      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start" }}>
+                        <div>
+                          {isCurrentWeek && <div style={{ fontSize: 10, fontFamily: "sans-serif", color: G, fontWeight: "bold", textTransform: "uppercase", letterSpacing: 1, marginBottom: 4 }}>Current Week</div>}
+                          <div style={{ fontSize: 15, color: "#222", marginBottom: 5 }}>Week of {p.weekOf}</div>
+                          <div style={{ display: "flex", flexWrap: "wrap", gap: 5 }}>
+                            {(p.meals || []).map(m => (
+                              <span key={m.id} style={{ fontSize: 11, background: "#f5f0e8", borderRadius: 20, padding: "2px 9px", fontFamily: "sans-serif", color: "#666" }}>{m.name}</span>
+                            ))}
+                          </div>
+                        </div>
+                        <span style={{ fontSize: 13, color: "#ccc", paddingLeft: 8, marginTop: 2 }}>›</span>
+                      </div>
+                    </div>
+                  );
+                })
+              )
+            )}
           </div>
         )}
 
