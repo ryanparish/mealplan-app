@@ -1,3 +1,5 @@
+const { createClient } = require("@supabase/supabase-js");
+
 exports.handler = async function (event, context) {
   if (event.httpMethod !== "POST") {
     return { statusCode: 405, body: "Method not allowed" };
@@ -15,35 +17,22 @@ exports.handler = async function (event, context) {
       };
     }
 
-    // Use week_of as the unique ID, slugified
+    const supabase = createClient(supabaseUrl, supabaseKey);
     const id = plan.weekOf.toLowerCase().replace(/[^a-z0-9]+/g, "-");
 
-    const response = await fetch(`${supabaseUrl}/rest/v1/meal_plans`, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "apikey": supabaseKey,
-        "Authorization": `Bearer ${supabaseKey}`,
-        "Prefer": "resolution=merge-duplicates",
-      },
-      body: JSON.stringify({ id, week_of: plan.weekOf, data: plan }),
-    });
+    const { error } = await supabase
+      .from("meal_plans")
+      .upsert({ id, week_of: plan.weekOf, data: plan });
 
-    if (!response.ok) {
-      const err = await response.text();
-      throw new Error(`Supabase error: ${err}`);
-    }
+    if (error) throw new Error(error.message);
 
     // Clean up plans older than 3 months
     const threeMonthsAgo = new Date();
     threeMonthsAgo.setMonth(threeMonthsAgo.getMonth() - 3);
-    await fetch(`${supabaseUrl}/rest/v1/meal_plans?created_at=lt.${threeMonthsAgo.toISOString()}`, {
-      method: "DELETE",
-      headers: {
-        "apikey": supabaseKey,
-        "Authorization": `Bearer ${supabaseKey}`,
-      },
-    });
+    await supabase
+      .from("meal_plans")
+      .delete()
+      .lt("created_at", threeMonthsAgo.toISOString());
 
     return {
       statusCode: 200,

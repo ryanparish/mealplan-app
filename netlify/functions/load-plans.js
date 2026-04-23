@@ -1,3 +1,5 @@
+const { createClient } = require("@supabase/supabase-js");
+
 exports.handler = async function (event, context) {
   if (event.httpMethod !== "GET") {
     return { statusCode: 405, body: "Method not allowed" };
@@ -14,23 +16,14 @@ exports.handler = async function (event, context) {
       };
     }
 
-    // Fetch all plans sorted by created_at descending
-    const response = await fetch(
-      `${supabaseUrl}/rest/v1/meal_plans?select=id,week_of,created_at,data&order=created_at.desc`,
-      {
-        headers: {
-          "apikey": supabaseKey,
-          "Authorization": `Bearer ${supabaseKey}`,
-        },
-      }
-    );
+    const supabase = createClient(supabaseUrl, supabaseKey);
 
-    if (!response.ok) {
-      const err = await response.text();
-      throw new Error(`Supabase error: ${err}`);
-    }
+    const { data: plans, error } = await supabase
+      .from("meal_plans")
+      .select("id, week_of, created_at, data")
+      .order("created_at", { ascending: false });
 
-    const plans = await response.json();
+    if (error) throw new Error(error.message);
 
     return {
       statusCode: 200,
