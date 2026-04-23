@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef } from "react";
-import { FAMILY_PROFILE } from "./profile.js";
+import { MEALS_PROFILE, GROCERY_PROFILE } from "./profile.js";
 
 const G = "#2d4a3e", CREAM = "#f7f4ef", BD = "#e8e2d8", GOLD = "#856404";
 
@@ -146,70 +146,66 @@ function GenerateTab({ onPlanGenerated }) {
 
   const set = (k, v) => setForm(p => ({ ...p, [k]: v }));
 
+  const callClaude = async (system, userMessage, maxTokens) => {
+    const res = await fetch("/.netlify/functions/generate", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        system,
+        messages: [{ role: "user", content: userMessage }],
+        max_tokens: maxTokens,
+      }),
+    });
+    const data = await res.json();
+    if (!res.ok || data.error) {
+      const errMsg = data.error?.message || JSON.stringify(data.error) || JSON.stringify(data);
+      throw new Error(`API returned ${res.status}: ${errMsg}`);
+    }
+    const text = data.content?.[0]?.text;
+    if (!text) throw new Error("No response from Claude");
+    // Robust JSON parsing
+    try { return JSON.parse(text); } catch {}
+    try { return JSON.parse(text.replace(/^```json\s*/i, "").replace(/```\s*$/i, "").trim()); } catch {}
+    const match = text.match(/\{[\s\S]*\}/);
+    if (match) return JSON.parse(match[0]);
+    throw new Error("Claude returned invalid JSON. Please try again.");
+  };
+
   const generate = async () => {
     if (!form.date) { setError("Please enter the week start date."); return; }
-    setError(""); setLoading(true); setStatus("Asking Claude to plan your week...");
+    setError(""); setLoading(true);
 
-    const userPrompt = `Please create this week's meal plan and grocery list.
-
-Week start date: ${form.date}
-Prep day: ${form.prepday}
-Ingredients to use up: ${form.ingredients || "nothing special"}
-Scheduling notes: ${form.schedule || "normal week"}
-Daughter's breakfast & lunch requests: ${form.daughter || "TBD — remind me"}
-Last week's meals (don't repeat): ${form.lastWeek || "not specified"}
-Leftovers in fridge to use up: ${form.leftovers || "none"}
-Extra grocery items needed this week: ${form.extras || "none"}
-Other notes: ${form.other || "none"}
-
-Remember: respond with only a valid JSON object matching the exact structure specified. No markdown, no explanation.`;
+    const weekContext = `Week: ${form.date}. Prep day: ${form.prepday}.
+Ingredients to use up: ${form.ingredients || "nothing special"}.
+Scheduling: ${form.schedule || "normal week"}.
+Daughter requests: ${form.daughter || "TBD"}.
+Last week's meals (don't repeat): ${form.lastWeek || "not specified"}.
+Leftovers in fridge: ${form.leftovers || "none"}.
+Other: ${form.other || "none"}.`;
 
     try {
-      const res = await fetch("/.netlify/functions/generate", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          system: FAMILY_PROFILE,
-          messages: [{ role: "user", content: userPrompt }],
-        }),
-      });
+      // Call 1: Generate meal plan
+      setStatus("Step 1 of 2 — Creating your meal plan...");
+      const mealPlan = await callClaude(
+        MEALS_PROFILE,
+        `Create a weekly meal plan for this week.\n\n${weekContext}`,
+        4000
+      );
 
-      const data = await res.json();
+      // Call 2: Generate grocery list based on the meals
+      setStatus("Step 2 of 2 — Building your grocery list...");
+      const mealSummary = (mealPlan.meals || []).map(m =>
+        `${m.day}: ${m.name} — ingredients: ${(m.ingredients || []).join(", ")}`
+      ).join("\n");
 
-      if (!res.ok || data.error) {
-        const errMsg = data.error?.message || JSON.stringify(data.error) || JSON.stringify(data);
-        throw new Error(`API returned ${res.status}: ${errMsg}`);
-      }
+      const groceryResult = await callClaude(
+        GROCERY_PROFILE,
+        `Generate a grocery list for this week's meals:\n\n${mealSummary}\n\nExtra items needed: ${form.extras || "none"}.`,
+        4000
+      );
 
-      const text = data.content?.[0]?.text;
-      if (!text) throw new Error("No response from Claude");
-
-      setStatus("Parsing your meal plan...");
-
-      // Try multiple parsing strategies
-      let plan;
-      try {
-        // Strategy 1: direct parse
-        plan = JSON.parse(text);
-      } catch {
-        try {
-          // Strategy 2: strip markdown fences
-          const stripped = text.replace(/^```json\s*/i, "").replace(/^```\s*/i, "").replace(/```\s*$/i, "").trim();
-          plan = JSON.parse(stripped);
-        } catch {
-          try {
-            // Strategy 3: extract first { ... } block
-            const match = text.match(/\{[\s\S]*\}/);
-            if (!match) throw new Error("No JSON object found in response");
-            plan = JSON.parse(match[0]);
-          } catch {
-            console.error("Raw response:", text);
-            throw new Error("Claude returned invalid JSON. Try generating again.");
-          }
-        }
-      }
-
-      onPlanGenerated(plan);
+      const fullPlan = { ...mealPlan, ...groceryResult };
+      onPlanGenerated(fullPlan);
       setStatus("");
     } catch (err) {
       setError(`Something went wrong: ${err.message}. Try again or check your API key in Netlify.`);
