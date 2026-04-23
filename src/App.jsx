@@ -165,7 +165,7 @@ Other notes: ${form.other || "none"}
 Remember: respond with only a valid JSON object matching the exact structure specified. No markdown, no explanation.`;
 
     try {
-      const res = await fetch("/api/generate", {
+      const res = await fetch("/.netlify/functions/generate", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
