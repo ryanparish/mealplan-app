@@ -40,11 +40,18 @@ async function callClaude(system, userMessage, maxTokens = 4000) {
   if (!res.ok || data.error) throw new Error(data.error?.message || JSON.stringify(data.error) || `API error ${res.status}`);
   const text = data.content?.[0]?.text;
   if (!text) throw new Error("No response from Claude");
+  // Strategy 1: direct parse
   try { return JSON.parse(text); } catch {}
-  try { return JSON.parse(text.replace(/^```json\s*/i, "").replace(/```\s*$/i, "").trim()); } catch {}
-  const m = text.match(/\{[\s\S]*\}/);
-  if (m) return JSON.parse(m[0]);
-  throw new Error("Claude returned invalid JSON. Please try again.");
+  // Strategy 2: strip markdown fences
+  try { return JSON.parse(text.replace(/^```json\s*/i, "").replace(/^```\s*/i, "").replace(/```\s*$/i, "").trim()); } catch {}
+  // Strategy 3: extract largest JSON object
+  const matches = [...text.matchAll(/\{[\s\S]*?\}/g)];
+  const biggest = matches.sort((a, b) => b[0].length - a[0].length)[0];
+  if (biggest) { try { return JSON.parse(biggest[0]); } catch {} }
+  // Strategy 4: find first { to last }
+  const start = text.indexOf("{"), end = text.lastIndexOf("}");
+  if (start >= 0 && end > start) { try { return JSON.parse(text.slice(start, end + 1)); } catch {} }
+  throw new Error(`The string did not match the expected pattern. Claude may need to try again — tap Generate again.`);
 }
 
 // ── Supabase helpers ──────────────────────────────────────────────────────────
@@ -180,7 +187,7 @@ Extra grocery items: ${form.extras || "none"}.
 Other: ${form.other || "none"}.${tasteProfile ? `\n\nFamily taste history (use this to make better choices):\n${tasteProfile}` : ""}`;
     try {
       setStatus("Step 1 of 2 — Creating your meal plan...");
-      const mealPlan = await callClaude(MEALS_PROFILE, `Create a weekly meal plan.\n\n${ctx}`, 4000);
+      const mealPlan = await callClaude(MEALS_PROFILE, `Create a weekly meal plan.\n\n${ctx}`, 5000);
       setStatus("Step 2 of 2 — Building your grocery list...");
       const mealSummary = (mealPlan.meals || []).map(m => `${m.day}: ${m.name} (${m.protein || "?"}g protein) — ingredients: ${(m.ingredients || []).join(", ")}`).join("\n");
       const groceryResult = await callClaude(GROCERY_PROFILE, `Generate a grocery list for these meals:\n\n${mealSummary}\n\nExtra items: ${form.extras || "none"}.`, 4000);
@@ -281,12 +288,13 @@ export default function App() {
       if (rating === "disliked") disliked.push(name);
     });
     Object.entries(notes).forEach(([name, note]) => {
-      if (note?.trim()) noted.push(`${name}: "${note.trim()}"`);
+      if (note?.trim()) noted.push(`${name}: "${note.trim().slice(0, 80)}"`);
     });
     const parts = [];
-    if (loved.length) parts.push(`Meals family loved: ${loved.join(", ")}`);
-    if (disliked.length) parts.push(`Meals family disliked (avoid repeating): ${disliked.join(", ")}`);
-    if (noted.length) parts.push(`Notes: ${noted.slice(0, 8).join(" · ")}`);
+    // Cap each section to avoid bloating the prompt
+    if (loved.length) parts.push(`Meals family loved: ${loved.slice(0, 10).join(", ")}`);
+    if (disliked.length) parts.push(`Meals family disliked (don't repeat): ${disliked.slice(0, 10).join(", ")}`);
+    if (noted.length) parts.push(`Cooking notes: ${noted.slice(0, 5).join(" · ")}`);
     return parts.join("\n");
   };
   // Recipe URL
@@ -327,11 +335,48 @@ export default function App() {
   const favMeals = (plan?.meals || []).filter(m => favs[m.name]);
   const hasPlan = plan && plan.meals && plan.meals.length > 0;
 
+  const [historyLoading, setHistoryLoading] = useState(true);
+  const [historyError, setHistoryError] = useState("");
+
+  // Normalize old plan structures so they display correctly in history
+  const normalizePlan = (p) => ({
+    weekOf: p.weekOf || "Unknown week",
+    prepDay: p.prepDay || "",
+    prepNote: p.prepNote || "",
+    prepSteps: p.prepSteps || [],
+    nightBeforeSteps: p.nightBeforeSteps || [],
+    meals: (p.meals || []).map(m => ({
+      id: m.id || "unknown",
+      day: m.day || "",
+      badge: m.badge || "⏱ Meal",
+      name: m.name || "Unknown meal",
+      estMin: m.estMin || 30,
+      protein: m.protein || null,
+      leftoverNote: m.leftoverNote || "",
+      spiceNote: m.spiceNote || "",
+      ingredients: m.ingredients || [],
+      steps: m.steps || [],
+    })),
+    lunchCoverage: p.lunchCoverage || [],
+    noCookLunch: p.noCookLunch || [],
+    grocery: p.grocery || {},
+    daughterReminder: p.daughterReminder || false,
+    groceryNeedsUpdate: p.groceryNeedsUpdate || false,
+  });
+
   // Load from cloud on mount
   useEffect(() => {
+    setHistoryLoading(true);
     loadPlans().then(plans => {
-      if (plans?.length > 0) { setPlan(plans[0].data); setHistory(plans); }
-    }).catch(() => {});
+      if (plans?.length > 0) {
+        setPlan(normalizePlan(plans[0].data));
+        setHistory(plans);
+      }
+      setHistoryLoading(false);
+    }).catch(err => {
+      setHistoryError("Could not load plans from cloud. Using local data.");
+      setHistoryLoading(false);
+    });
   }, []);
 
   const syncToCloud = async (updatedPlan) => {
@@ -1032,12 +1077,19 @@ export default function App() {
               </div>
             ) : (
               history.length === 0
-                ? <div style={{ textAlign: "center", padding: "40px 20px", color: "#aaa" }}><div style={{ fontSize: 32, marginBottom: 12 }}>📚</div><div style={{ fontSize: 13 }}>No past plans yet!</div></div>
+                ? <div style={{ textAlign: "center", padding: "40px 20px", color: "#aaa" }}>
+                    {historyLoading
+                      ? <><div style={{ fontSize: 32, marginBottom: 12 }}>⏳</div><div style={{ fontSize: 13 }}>Loading your plan history...</div></>
+                      : historyError
+                        ? <><div style={{ fontSize: 32, marginBottom: 12 }}>⚠️</div><div style={{ fontSize: 13, color: "#c62828" }}>{historyError}</div></>
+                        : <><div style={{ fontSize: 32, marginBottom: 12 }}>📚</div><div style={{ fontSize: 13 }}>No past plans yet — generate your first plan!</div></>
+                    }
+                  </div>
                 : history.map((record, i) => {
                   const p = record.data;
                   const isCurrentWeek = i === 0;
                   return (
-                    <div key={record.id} onClick={() => setViewingPast(p)} style={{ background: "#fff", borderRadius: 12, border: `1px solid ${isCurrentWeek ? G : BD}`, padding: "13px 15px", marginBottom: 10, cursor: "pointer", boxShadow: "0 1px 5px rgba(0,0,0,.04)" }}>
+                    <div key={record.id} onClick={() => setViewingPast(normalizePlan(p))} style={{ background: "#fff", borderRadius: 12, border: `1px solid ${isCurrentWeek ? G : BD}`, padding: "13px 15px", marginBottom: 10, cursor: "pointer", boxShadow: "0 1px 5px rgba(0,0,0,.04)" }}>
                       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start" }}>
                         <div>
                           {isCurrentWeek && <div style={{ fontSize: 10, color: G, fontWeight: "bold", textTransform: "uppercase", letterSpacing: 1, marginBottom: 4 }}>Current Week</div>}
